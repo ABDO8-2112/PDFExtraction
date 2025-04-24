@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using PDFExtraction.Data;
+using PDFExtraction.Services;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {

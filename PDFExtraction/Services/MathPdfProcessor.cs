@@ -1,254 +1,94 @@
-using iText.Kernel.Pdf.Canvas.Parser.Data;
-using iText.Kernel.Pdf.Canvas.Parser.Listener;
-using iText.Kernel.Pdf.Canvas.Parser;
-using Microsoft.AspNetCore.Components.Sections;
-using System.Text.RegularExpressions;
-using System.Text;
-using PDFExtraction.Models;
 using iText.Kernel.Pdf;
-using System.Drawing.Imaging;
-using Microsoft.Extensions.Logging;
-using System.Drawing;
+using iText.Kernel.Pdf.Canvas.Parser;
+using iText.Kernel.Pdf.Canvas.Parser.Listener;
+using PDFExtraction.Models;
+using System.Text;
 
-public class MathPdfProcessor
+namespace PDFExtraction.Services
 {
-    private readonly IWebHostEnvironment _env;
-    private readonly ILogger<MathPdfProcessor> _logger;
-
-    public MathPdfProcessor(IWebHostEnvironment env, ILogger<MathPdfProcessor> logger)
+    public class MathPdfProcessor
     {
-        _env = env;
-        _logger = logger;
-    }
+        private readonly ILogger<MathPdfProcessor> _logger;
+        private readonly IWebHostEnvironment _environment;
 
-    public async Task<PdfExtractionResult> ProcessMathPdf(IFormFile pdfFile)
-    {
-        var result = new PdfExtractionResult
+        public MathPdfProcessor(ILogger<MathPdfProcessor> logger, IWebHostEnvironment environment)
         {
-            PdfFileName = Path.GetFileNameWithoutExtension(pdfFile.FileName),
-            Chapters = new List<ChapterContent>()
-        };
+            _logger = logger;
+            _environment = environment;
+        }
 
-        var imagesDir = Path.Combine(_env.WebRootPath, "math-images", result.PdfFileName);
-        Directory.CreateDirectory(imagesDir);
-
-        using (var stream = new MemoryStream())
+        public async Task<PdfExtractionResponse> ProcessPdfAsync(IFormFile file)
         {
-            await pdfFile.CopyToAsync(stream);
-            stream.Position = 0;
+            if (file == null || file.Length == 0)
+                throw new ArgumentException("Uploaded file is empty or null");
 
-            using (var pdf = new PdfDocument(new PdfReader(stream)))
+            var response = new PdfExtractionResponse
             {
-                var chapter = new ChapterContent
+                Response = new Models.ResponseData
                 {
-                    Title = "CIRCLES",
-                    Sections = new List<PDFExtraction.Models.SectionContent>(),
-                    Figures = new List<FigureContent>()
+                    Book = null,
+                    Subject = null,
+                    Chapters = new List<Models.Chapter>()
+                },
+                PdfFileName = file.FileName
+            };
+
+            var uploadsPath = Path.Combine(_environment.WebRootPath, "pdf_data");
+            Directory.CreateDirectory(uploadsPath);
+
+            var fileName = Path.GetFileNameWithoutExtension(file.FileName);
+            var savedPdfPath = Path.Combine(uploadsPath, $"{fileName}_{Guid.NewGuid()}.pdf");
+
+            // Save PDF temporarily
+            using (var stream = new FileStream(savedPdfPath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            var imagesFolder = Path.Combine(uploadsPath, fileName);
+            Directory.CreateDirectory(imagesFolder);
+
+            using var pdfReader = new PdfReader(savedPdfPath);
+            using var pdfDoc = new PdfDocument(pdfReader);
+            var totalPages = pdfDoc.GetNumberOfPages();
+
+            var chapter = new Models.Chapter { ChapterName = "Default Chapter" };
+            var topic = new Topic { TopicName = "Default Topic" };
+            chapter.Topics.Add(topic);
+            response.Response.Chapters.Add(chapter);
+
+            for (int i = 1; i <= totalPages; i++)
+            {
+                var page = pdfDoc.GetPage(i);
+
+                // Extract text
+                var strategy = new SimpleTextExtractionStrategy();
+                var text = PdfTextExtractor.GetTextFromPage(page, strategy);
+                text = Encoding.UTF8.GetString(Encoding.Convert(Encoding.Default, Encoding.UTF8, Encoding.Default.GetBytes(text)));
+
+                var section = new PDFExtraction.Models.Section
+                {
+                    SectionName = $"Page {i}",
+                    Content = text
                 };
 
-                // First pass: Extract all figures
-                var figureExtractor = new MathFigureExtractor(imagesDir, result.PdfFileName);
-                for (int i = 1; i <= pdf.GetNumberOfPages(); i++)
-                {
-                    var processor = new PdfCanvasProcessor(figureExtractor);
-                    processor.ProcessPageContent(pdf.GetPage(i));
-                }
-                chapter.Figures = figureExtractor.GetFigures();
+                var imageUrls = ExtractImagesFromPage(page, imagesFolder, fileName, i);
+                section.ImageUrls.AddRange(imageUrls.Select(path => new ImageUrl { Img = path }));
 
-                // Second pass: Extract and structure content
-                var textExtractor = new MathTextExtractor(chapter.Figures);
-                for (int i = 1; i <= pdf.GetNumberOfPages(); i++)
-                {
-                    var pageText = PdfTextExtractor.GetTextFromPage(pdf.GetPage(i), textExtractor);
-                    textExtractor.ProcessPageText(pageText, i);
-                }
-
-                chapter.Sections = textExtractor.GetSections();
-                chapter.Exercises = textExtractor.GetExercises();
-                result.Chapters.Add(chapter);
-            }
-        }
-
-        return result;
-    }
-}
-
-public class MathFigureExtractor : IEventListener
-{
-    private readonly string _outputDir;
-    private readonly string _pdfName;
-    private readonly List<FigureContent> _figures = new List<FigureContent>();
-    private int _figureCount = 1;
-
-    public MathFigureExtractor(string outputDir, string pdfName)
-    {
-        _outputDir = outputDir;
-        _pdfName = pdfName;
-    }
-
-    public void EventOccurred(IEventData data, EventType type)
-    {
-        if (type == EventType.RENDER_IMAGE)
-        {
-            var imageData = (ImageRenderInfo)data;
-            var image = imageData.GetImage();
-            if (image != null)
-            {
-                var figureNum = _figureCount++;
-                var figureName = $"fig_9.{figureNum}";
-                var fileName = $"{figureName}.jpg";
-                var filePath = Path.Combine(_outputDir, fileName);
-
-                try
-                {
-                    using (var fs = new FileStream(filePath, FileMode.Create))
-                    {
-                        fs.Write(image.GetImageBytes());
-                    }
-
-                    _figures.Add(new FigureContent
-                    {
-                        Reference = figureName,
-                        ImagePath = $"/math-images/{_pdfName}/{fileName}"
-                    });
-                }
-                catch (Exception ex)
-                {
-                    //_logger.LogError(ex, $"Failed to save figure {figureName}");
-                }
-            }
-        }
-    }
-
-    public List<FigureContent> GetFigures() => _figures;
-    public ICollection<EventType> GetSupportedEvents() => new[] { EventType.RENDER_IMAGE };
-}
-
-public class MathTextExtractor : ITextExtractionStrategy
-{
-    private readonly List<FigureContent> _figures;
-    private readonly List<PDFExtraction.Models.SectionContent> _sections = new List<PDFExtraction.Models.SectionContent>();
-    private readonly List<ExerciseContent> _exercises = new List<ExerciseContent>();
-    private StringBuilder _currentText = new StringBuilder();
-    private readonly string _outputDir;
-    private readonly string _pdfFileName;  // Set via constructor
-    private readonly List<ImageUrlDto> _imageUrls = new List<ImageUrlDto>();
-
-    public MathTextExtractor(List<FigureContent> figures)
-    {
-        _figures = figures;
-        _outputDir =  "pdf-images"; // Default fallback
-        _pdfFileName =  "unknown";       
-        Directory.CreateDirectory(_outputDir); // Ensure exists
-    }
-
-    public void ProcessPageText(string pageText, int pageNumber)
-    {
-        // Process theorems and definitions
-        var theoremMatches = Regex.Matches(pageText, @"(Theorem \d+\.\d+:)([\s\S]+?)(?=(Theorem|EXERCISE|$))");
-        foreach (Match match in theoremMatches)
-        {
-            _sections.Add(new PDFExtraction.Models.SectionContent
-            {
-                Title = match.Groups[1].Value.Trim(),
-                Content = match.Groups[2].Value.Trim(),
-                RelatedFigures = FindFiguresInText(match.Value)
-            });
-        }
-
-        // Process exercises
-        var exerciseMatches = Regex.Matches(pageText, @"(EXERCISE \d+\.\d+)([\s\S]+?)(?=(EXERCISE|Theorem|$))");
-        foreach (Match match in exerciseMatches)
-        {
-            _exercises.Add(new ExerciseContent
-            {
-                Title = match.Groups[1].Value.Trim(),
-                Problems = match.Groups[2].Value.Trim(),
-                RelatedFigures = FindFiguresInText(match.Value)
-            });
-        }
-    }
-
-    private List<FigureContent> FindFiguresInText(string text)
-    {
-        var figureRefs = Regex.Matches(text, @"Fig\.\s?\d+\.\d+")
-            .Select(m => m.Value.Replace(" ", ""));
-        return _figures.Where(f => figureRefs.Contains(f.Reference)).ToList();
-    }
-
-    // Required interface implementation
-    public void RenderText(TextRenderInfo renderInfo) => _currentText.Append(renderInfo.GetText());
-    public string GetResultantText() => _currentText.ToString();
-
-    public List<PDFExtraction.Models.SectionContent> GetSections() => _sections;
-    public List<ExerciseContent> GetExercises() => _exercises;
-
-    public void EventOccurred(IEventData data, EventType type)
-    {
-        // Only process image rendering events
-        if (type != EventType.RENDER_IMAGE) return;
-
-        var renderInfo = (ImageRenderInfo)data;
-        var imageObject = renderInfo.GetImage();
-        if (imageObject == null) return;
-
-        try
-        {
-            // Get raw image bytes
-            var imageBytes = imageObject.GetImageBytes();
-            if (imageBytes == null || imageBytes.Length == 0) return;
-
-            // Generate filename using figure references when available
-            var figureRef = GetFigureReference(renderInfo);
-            var imageName = string.IsNullOrEmpty(figureRef)
-                ? $"{Guid.NewGuid()}.jpg"
-                : $"{figureRef}.jpg";
-
-            var imagePath = Path.Combine(_outputDir, imageName);
-
-            // Convert and save as JPEG using System.Drawing
-            using (var ms = new MemoryStream(imageBytes))
-            using (var image = Image.FromStream(ms))
-            {
-                image.Save(imagePath, ImageFormat.Jpeg);
+                topic.Sections.Add(section);
             }
 
-            // Add to collected images
-            _imageUrls.Add(new ImageUrlDto
-            {
-                Img = $"/pdf-images/{_pdfFileName}/{imageName}",
-                Reference = figureRef
-            });
+            return response;
         }
-        catch (Exception ex)
-        {
-            //_logger?.LogError(ex, "Failed to process PDF image");
-        }
-    }
 
-    public ICollection<EventType> GetSupportedEvents()
-    {
-        // Only subscribe to image render events
-        return new HashSet<EventType> { EventType.RENDER_IMAGE };
-    }
-
-    // Helper method to extract figure references (e.g. "Fig.9.1")
-    private string GetFigureReference(ImageRenderInfo renderInfo)
-    {
-        try
+        private List<string> ExtractImagesFromPage(PdfPage page, string outputDir, string baseFileName, int pageIndex)
         {
-            // Get the image's XObject name
-            var xObjectName = renderInfo.GetImage().GetPdfObject().GetAsName(PdfName.Name);
-            if (xObjectName != null)
-            {
-                var name = xObjectName.GetValue();
-                if (name.StartsWith("Fig") || name.StartsWith("Figure"))
-                {
-                    return name.Replace(" ", "").Replace(".", "_");
-                }
-            }
+            var imagePaths = new List<string>();
+            var renderer = new MyImageRenderListener(outputDir, baseFileName, pageIndex);
+            var parser = new PdfCanvasProcessor(renderer);
+            parser.ProcessPageContent(page);
+            imagePaths.AddRange(renderer.ExtractedImages);
+            return imagePaths;
         }
-        catch { /* Ignore extraction errors */ }
-        return null;
     }
 }

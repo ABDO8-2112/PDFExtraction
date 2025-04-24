@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using PDFExtraction.Data;
 using PDFExtraction.Models;
+using PDFExtraction.Services;
 
 namespace PDFExtraction.Controllers
 {
@@ -28,7 +29,7 @@ namespace PDFExtraction.Controllers
                 return BadRequest("No files uploaded.");
             }
 
-            var results = new List<PdfExtractionResult>();
+            var results = new List<PdfExtractionResponse>();
 
             foreach (var file in files)
             {
@@ -38,7 +39,7 @@ namespace PDFExtraction.Controllers
                 }
 
 
-                var result = await _pdfService.ProcessMathPdf(file);
+                var result = await _pdfService.ProcessPdfAsync(file);
                 results.Add(result);
 
                 // Save to database
