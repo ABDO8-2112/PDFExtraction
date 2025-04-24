@@ -1,7 +1,11 @@
+using Docnet.Core.Models;
+using Docnet.Core;
 using iText.Kernel.Pdf;
 using iText.Kernel.Pdf.Canvas.Parser;
 using iText.Kernel.Pdf.Canvas.Parser.Listener;
 using PDFExtraction.Models;
+using System.Drawing.Imaging;
+using System.Drawing;
 using System.Text;
 
 namespace PDFExtraction.Services
@@ -57,23 +61,28 @@ namespace PDFExtraction.Services
             chapter.Topics.Add(topic);
             response.Response.Chapters.Add(chapter);
 
+            var renderedImages = RenderPageAsImage(savedPdfPath, imagesFolder, fileName);
             for (int i = 1; i <= totalPages; i++)
             {
                 var page = pdfDoc.GetPage(i);
 
-                // Extract text
                 var strategy = new SimpleTextExtractionStrategy();
                 var text = PdfTextExtractor.GetTextFromPage(page, strategy);
                 text = Encoding.UTF8.GetString(Encoding.Convert(Encoding.Default, Encoding.UTF8, Encoding.Default.GetBytes(text)));
 
-                var section = new PDFExtraction.Models.Section
+                var section = new Section
                 {
                     SectionName = $"Page {i}",
-                    Content = text
+                    Content = text,
+                    ImageUrls = new List<ImageUrl>()
                 };
 
-                var imageUrls = ExtractImagesFromPage(page, imagesFolder, fileName, i);
-                section.ImageUrls.AddRange(imageUrls.Select(path => new ImageUrl { Img = path }));
+                // Match image for this page
+                var imageIndex = i - 1;
+                if (imageIndex < renderedImages.Count)
+                {
+                    section.ImageUrls.Add(new ImageUrl { Img = renderedImages[imageIndex] });
+                }
 
                 topic.Sections.Add(section);
             }
@@ -81,13 +90,29 @@ namespace PDFExtraction.Services
             return response;
         }
 
-        private List<string> ExtractImagesFromPage(PdfPage page, string outputDir, string baseFileName, int pageIndex)
+        public List<string> RenderPageAsImage(string pdfPath, string outputDir, string baseFileName)
         {
             var imagePaths = new List<string>();
-            var renderer = new MyImageRenderListener(outputDir, baseFileName, pageIndex);
-            var parser = new PdfCanvasProcessor(renderer);
-            parser.ProcessPageContent(page);
-            imagePaths.AddRange(renderer.ExtractedImages);
+            using var docReader = DocLib.Instance.GetDocReader(File.ReadAllBytes(pdfPath), new PageDimensions(1080, 1920));
+            var pageCount = docReader.GetPageCount();
+
+            for (int i = 0; i < pageCount; i++)
+            {
+                using var pageReader = docReader.GetPageReader(i);
+                var rawBytes = pageReader.GetImage();
+                var width = pageReader.GetPageWidth();
+                var height = pageReader.GetPageHeight();
+
+                using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                var bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.WriteOnly, bmp.PixelFormat);
+                System.Runtime.InteropServices.Marshal.Copy(rawBytes, 0, bmpData.Scan0, rawBytes.Length);
+                bmp.UnlockBits(bmpData);
+
+                var imgPath = Path.Combine(outputDir, $"{baseFileName}_page{i + 1}.jpg");
+                bmp.Save(imgPath, ImageFormat.Jpeg);
+                imagePaths.Add("/pdf_data/" + Path.GetFileName(outputDir) + "/" + Path.GetFileName(imgPath));
+            }
+
             return imagePaths;
         }
     }
